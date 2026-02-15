@@ -29,46 +29,48 @@ string connectionString,
     googleClientId,
     googleClientSecret;
 
-try
+if (builder.Environment.IsProduction())
 {
-    var keyVaultUrl = new Uri($"https://{builder.Configuration["FinHubKeyVault"]}.vault.azure.net/");
-    var client = new SecretClient(keyVaultUrl, new DefaultAzureCredential());
+    try
+    {
+        var keyVaultUrl = new Uri($"https://{builder.Configuration["FinHubKeyVault"]}.vault.azure.net/");
+        var client = new SecretClient(keyVaultUrl, new DefaultAzureCredential());
 
-    connectionString = (await client.GetSecretAsync("DbConnectionString")).Value.Value;
-    jwtIssuerSecret = (await client.GetSecretAsync("JwtIssuer")).Value.Value;
-    jwtAudienceSecret = (await client.GetSecretAsync("JwtAudience")).Value.Value;
-    jwtKeySecret = (await client.GetSecretAsync("JwtKey")).Value.Value;
-    googleClientId = (await client.GetSecretAsync("GoogleClientId")).Value.Value;
-    googleClientSecret = (await client.GetSecretAsync("GoogleClientSecret")).Value.Value;
-    //pictures
-    blobStorageConnectionString = (await client.GetSecretAsync("AzureBlobStorageConnectionString")).Value.Value;
-    containerName = (await client.GetSecretAsync("ProfilePicturesContainer")).Value.Value;
+        connectionString = (await client.GetSecretAsync("DbConnectionString")).Value.Value;
+        jwtIssuerSecret = (await client.GetSecretAsync("JwtIssuer")).Value.Value;
+        jwtAudienceSecret = (await client.GetSecretAsync("JwtAudience")).Value.Value;
+        jwtKeySecret = (await client.GetSecretAsync("JwtKey")).Value.Value;
+        googleClientId = (await client.GetSecretAsync("GoogleClientId")).Value.Value;
+        googleClientSecret = (await client.GetSecretAsync("GoogleClientSecret")).Value.Value;
+        blobStorageConnectionString = (await client.GetSecretAsync("AzureBlobStorageConnectionString")).Value.Value;
+        containerName = (await client.GetSecretAsync("ProfilePicturesContainer")).Value.Value;
 
-    builder.Services.AddTransient<IAzureBlobStorageService>(provider =>
-        new AzureBlobStorageService(blobStorageConnectionString, containerName));
+        builder.Services.AddTransient<IAzureBlobStorageService>(provider =>
+            new AzureBlobStorageService(blobStorageConnectionString, containerName));
 
-    builder.Configuration["JwtKey"] = jwtKeySecret;
-    builder.Configuration["JwtIssuer"] = jwtIssuerSecret;
-    builder.Configuration["JwtAudience"] = jwtAudienceSecret;
-    builder.Configuration["AzureBlobStorageConnectionString"] = blobStorageConnectionString;
-    builder.Configuration["ProfilePicturesContainer"] = containerName;
-    builder.Configuration["GoogleClientId"] = googleClientId;
-    builder.Configuration["GoogleClientSecret"] = googleClientSecret;
+        builder.Services.AddDbContext<FinHubDbContext>(options =>
+            options.UseNpgsql(connectionString));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error retrieving secrets from Key Vault: {ex.Message}");
+        throw;
+    }
 }
-catch (Exception ex)
+else
 {
-    Console.WriteLine($"Error retrieving secrets from Key Vault: {ex.Message}");
-    throw;
+    connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+    jwtIssuerSecret = builder.Configuration["JwtIssuer"];
+    jwtAudienceSecret = builder.Configuration["JwtAudience"];
+    jwtKeySecret = builder.Configuration["JwtKey"];
+    googleClientId = builder.Configuration["GoogleClientId"];
+    googleClientSecret = builder.Configuration["GoogleClientSecret"];
+
+    builder.Services.AddTransient<IAzureBlobStorageService, LocalAzureBlobStorageService>();
+
+    builder.Services.AddDbContext<FinHubDbContext>(options =>
+        options.UseSqlite(connectionString));
 }
-
-if (builder.Environment.IsDevelopment())
-{
-    connectionString = "Host=localhost;Port=5432;Database=finhub;Username=finhub;Password=finhub";
-}
-
-
-builder.Services.AddDbContext<FinHubDbContext>(options =>
-    options.UseNpgsql(connectionString));
 
 // Register Identity with custom User and Role types
 builder.Services.AddIdentity<User, AppRole>(options =>
@@ -143,8 +145,7 @@ builder.Services.AddInfrastructure(builder.Configuration);
 
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<PresenceTracker>();
-builder.Services.AddScoped<ILikeHub, LikeHub>(); 
-
+builder.Services.AddScoped<ILikeHub, LikeHub>();
 
 
 // Add services to the container.
@@ -164,11 +165,26 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Очистити таблицю "Connections" перед запуском хаба
 using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<FinHubDbContext>();
-    await context.Database.ExecuteSqlRawAsync("DELETE FROM \"Connections\"");
+
+    context.Database.EnsureCreated();
+
+    var connection = context.Database.GetDbConnection();
+    if (connection is Microsoft.Data.Sqlite.SqliteConnection)
+    {
+        var tableExists = context.Database.ExecuteSqlRaw(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='Connections';") > 0;
+        if (tableExists)
+        {
+            await context.Database.ExecuteSqlRawAsync("DELETE FROM \"Connections\"");
+        }
+    }
+    else
+    {
+        await context.Database.ExecuteSqlRawAsync("DELETE FROM \"Connections\"");
+    }
 }
 
 
